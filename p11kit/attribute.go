@@ -21,9 +21,13 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/sha512"
 	"crypto/x509"
 	"encoding/asn1"
+	"encoding/binary"
 	"fmt"
+	"hash"
 	"math"
 	"math/big"
 	"sync"
@@ -551,7 +555,11 @@ const (
 	ckgMGF1SHA512 = 0x00000004
 
 	// https://docs.oasis-open.org/pkcs11/pkcs11-curr/v2.40/os/pkcs11-curr-v2.40-os.html#_Toc399313332
-	ckdNull = 0x00000001
+	ckdNull      = 0x00000001
+	ckdSHA224KDF = 0x00000005
+	ckdSHA256KDF = 0x00000006
+	ckdSHA384KDF = 0x00000007
+	ckdSHA512KDF = 0x00000008
 )
 
 var mechanismToString = map[uint32]string{
@@ -618,7 +626,7 @@ func deriveECDH(m mechanism, base Object, tmpl []attribute) (Object, error) {
 		return Object{}, errKeyFunctionNotPermitted
 	}
 
-	secret, err := ecdhSharedSecret(priv, p.publicData, p.kdf)
+	secret, err := ecdhSharedSecret(priv, p.publicData)
 	if err != nil {
 		return Object{}, err
 	}
@@ -637,11 +645,22 @@ func deriveECDH(m mechanism, base Object, tmpl []attribute) (Object, error) {
 		case attributeValueLen:
 			var n uint64
 			if t.setUint64(&n) {
-				secret = resizeSecret(secret, n)
 				valueLen = n
 			}
 		}
 	}
+
+	if p.kdf != ckdNull {
+		h, err := hashForKDF(p.kdf)
+		if err != nil {
+			return Object{}, err
+		}
+		secret, err = x963KDF(secret, h, p.sharedData, int(valueLen))
+		if err != nil {
+			return Object{}, err
+		}
+	}
+	secret = resizeSecret(secret, valueLen)
 
 	id, err := newObjectID()
 	if err != nil {
@@ -657,10 +676,10 @@ func deriveECDH(m mechanism, base Object, tmpl []attribute) (Object, error) {
 }
 
 // ecdhSharedSecret computes the CKM_ECDH1_DERIVE shared secret: the
-// x-coordinate of the point priv.D * peerPublic, post-processed by the KDF.
+// x-coordinate of the point priv.D * peerPublic.
 //
 // https://docs.oasis-open.org/pkcs11/pkcs11-curr/v2.40/os/pkcs11-curr-v2.40-os.html#_Toc399313332
-func ecdhSharedSecret(priv *ecdsa.PrivateKey, publicData []byte, kdf uint64) ([]byte, error) {
+func ecdhSharedSecret(priv *ecdsa.PrivateKey, publicData []byte) ([]byte, error) {
 	curve := priv.Curve
 	byteLen := (curve.Params().BitSize + 7) / 8
 
@@ -677,13 +696,49 @@ func ecdhSharedSecret(priv *ecdsa.PrivateKey, publicData []byte, kdf uint64) ([]
 	sx, _ := curve.ScalarMult(x, y, priv.D.Bytes())
 	secret := make([]byte, byteLen)
 	sx.FillBytes(secret)
+	return secret, nil
+}
 
+// hashForKDF returns the hash used by an ECDH1 key derivation function.
+func hashForKDF(kdf uint64) (func() hash.Hash, error) {
 	switch kdf {
-	case ckdNull:
-		return secret, nil
+	case ckdSHA224KDF:
+		return sha256.New224, nil
+	case ckdSHA256KDF:
+		return sha256.New, nil
+	case ckdSHA384KDF:
+		return sha512.New384, nil
+	case ckdSHA512KDF:
+		return sha512.New, nil
 	default:
 		return nil, fmt.Errorf("unsupported ECDH1 KDF 0x%08x: %w", kdf, errMechanismParamInvalid)
 	}
+}
+
+// x963KDF derives outLen bytes using the ANSI X9.63 key derivation function,
+// as referenced by the ECDH1 KDFs: the concatenation of
+//
+//	Hash(Z || counter || sharedData)
+//
+// for counters 1, 2, ..., truncated to outLen bytes. The counter is a 32-bit
+// big-endian value.
+//
+// https://docs.oasis-open.org/pkcs11/pkcs11-curr/v2.40/os/pkcs11-curr-v2.40-os.html#_Toc399313332
+func x963KDF(secret []byte, h func() hash.Hash, sharedData []byte, outLen int) ([]byte, error) {
+	if outLen <= 0 {
+		return nil, errMechanismParamInvalid
+	}
+	var out []byte
+	for counter := uint32(1); len(out) < outLen; counter++ {
+		h := h()
+		h.Write(secret)
+		var c [4]byte
+		binary.BigEndian.PutUint32(c[:], counter)
+		h.Write(c[:])
+		h.Write(sharedData)
+		out = h.Sum(out)
+	}
+	return out[:outLen], nil
 }
 
 // resizeSecret returns the shared secret resized to n bytes, treating it as a

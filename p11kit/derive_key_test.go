@@ -15,12 +15,62 @@
 package p11kit
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"testing"
 )
+
+// TestX963KDF verifies the ANSI X9.63 KDF against vectors computed
+// independently (pycryptodome/Python implementation of the same construction).
+func TestX963KDF(t *testing.T) {
+	z := []byte{
+		0x53, 0x55, 0x98, 0x82, 0x72, 0xa7, 0x08, 0xa2,
+		0xae, 0x3a, 0x0b, 0xc4, 0x74, 0x12, 0x22, 0xf2,
+		0x06, 0xb1, 0xad, 0x81, 0xfa, 0x97, 0xb2, 0x83,
+		0x69, 0xa0, 0x2a, 0xa6, 0xc0, 0xb0, 0x8b, 0x8b,
+	}
+	shared := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+
+	tests := []struct {
+		name   string
+		kdf    uint64
+		outLen int
+		shared []byte
+		want   string
+	}{
+		{"SHA224", ckdSHA224KDF, 28, shared, "8bc730a61fcaec33f6e82d7c591b9df3311ef66b81bd5bdde3d5129b"},
+		{"SHA256", ckdSHA256KDF, 32, shared, "7f6c76ea19ee279b7800712867a458a65fb506824727bad328719a52c432f620"},
+		{"SHA256MultiBlock", ckdSHA256KDF, 48, shared, "7f6c76ea19ee279b7800712867a458a65fb506824727bad328719a52c432f6202e258d89a26231ee1cffee3e9025652c"},
+		{"SHA256NoSharedData", ckdSHA256KDF, 64, nil, "67d72d20afe2222bf50f9595f9e1eaf202b3d2b18bab49aa6883fcc4db15fe68652b5633cbf8729e7031331f93e1a177f67b2a8dd58b15d6332482a99354fedd"},
+		{"SHA384", ckdSHA384KDF, 48, shared, "031643d8c92a036742a7d17d4a018740440582743999414c672e53eceb23968ccf5b9c94bace62bf0d2fb95a328dbf5a"},
+		{"SHA512", ckdSHA512KDF, 64, shared, "bc94986015d5445832b268be347ba944519aabf2d088a172cfdb099700d1faed64bcb5ea1b61fab04e0937dd97ee5c3c1d04c8e9676ccb1635a0890d4aeda5a2"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, err := hashForKDF(tt.kdf)
+			if err != nil {
+				t.Fatalf("hashForKDF: %v", err)
+			}
+			got, err := x963KDF(z, h, tt.shared, tt.outLen)
+			if err != nil {
+				t.Fatalf("x963KDF: %v", err)
+			}
+			if gotHex := hex.EncodeToString(got); gotHex != tt.want {
+				t.Errorf("x963KDF = %s, want %s", gotHex, tt.want)
+			}
+		})
+	}
+
+	if _, err := x963KDF(z, sha256.New, shared, 0); !errors.Is(err, errMechanismParamInvalid) {
+		t.Errorf("x963KDF with zero length = %v, want %v", err, errMechanismParamInvalid)
+	}
+}
 
 // ecdhPoint returns the ANSI X9.62 uncompressed encoding of a public point.
 func ecdhPoint(pub *ecdsa.PublicKey) []byte {
@@ -128,6 +178,68 @@ func TestHandleDeriveKey(t *testing.T) {
 	}
 }
 
+// TestHandleDeriveKeySHA256 verifies an end-to-end C_DeriveKey with the
+// CKM_ECDH1_DERIVE CKD_SHA256_KDF key derivation function.
+func TestHandleDeriveKeySHA256(t *testing.T) {
+	basePriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generating base key: %v", err)
+	}
+	peerPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generating peer key: %v", err)
+	}
+
+	base, err := NewPrivateKeyObject(basePriv)
+	if err != nil {
+		t.Fatalf("creating base object: %v", err)
+	}
+	base.SetDerive()
+
+	shared := []byte{0x01, 0x02, 0x03, 0x04}
+	valueLen := uint64(32)
+	class := ckoSecretKey
+	keyType := ckkGenericSecret
+	tmpl := []attribute{
+		{typ: attributeClass, ulong: &class},
+		{typ: attributeKeyType, ulong: &keyType},
+		{typ: attributeValueLen, ulong: &valueLen},
+	}
+
+	m := mechanism{typ: ckmECDH1Derive, params: ecdh1DeriveParams{
+		kdf:        ckdSHA256KDF,
+		sharedData: shared,
+		publicData: ecdhPoint(&peerPriv.PublicKey),
+	}}
+
+	h, s := newDeriveHandler(t, base)
+	resp, err := h.handleDeriveKey(deriveKeyRequest(1, m, base.id, tmpl))
+	if err != nil {
+		t.Fatalf("handleDeriveKey: %v", err)
+	}
+	derived := s.objects[1]
+	if derived.id != respBufferUlong(resp) {
+		t.Errorf("derived key id = %d, response id = %d", derived.id, respBufferUlong(resp))
+	}
+
+	// Expected: the raw ECDH shared secret run through the X9.63 KDF.
+	sx, _ := basePriv.Curve.ScalarMult(peerPriv.X, peerPriv.Y, basePriv.D.Bytes())
+	raw := make([]byte, 32)
+	sx.FillBytes(raw)
+	want, err := x963KDF(raw, sha256.New, shared, 32)
+	if err != nil {
+		t.Fatalf("x963KDF: %v", err)
+	}
+
+	secret, ok := derived.attributeValue(attributeValue)
+	if !ok {
+		t.Fatalf("derived key has no CKA_VALUE")
+	}
+	if !bytes.Equal(secret.bytes, want) {
+		t.Errorf("derived secret = %x, want %x", secret.bytes, want)
+	}
+}
+
 func TestHandleDeriveKeyErrors(t *testing.T) {
 	newBase := func(t *testing.T) (Object, *ecdsa.PrivateKey) {
 		t.Helper()
@@ -175,7 +287,7 @@ func TestHandleDeriveKeyErrors(t *testing.T) {
 		base.SetDerive()
 		h, _ := newDeriveHandler(t, base)
 		m := mechanism{typ: ckmECDH1Derive, params: ecdh1DeriveParams{
-			kdf:        0x00000002, // CKD_SHA1_KDF, unsupported
+			kdf:        0x00000002, // CKD_SHA1_KDF, not implemented
 			publicData: ecdhPoint(&priv.PublicKey),
 		}}
 		_, err := h.handleDeriveKey(deriveKeyRequest(1, m, base.id, nil))

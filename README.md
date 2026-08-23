@@ -36,7 +36,9 @@ EC private keys can derive a shared secret via `C_DeriveKey` with
 $ pkcs11-tool --module /usr/lib/x86_64-linux-gnu/pkcs11/p11-kit-client.so --derive --mechanism ECDH1-DERIVE --slot=0x1 --label=my-key --input-file=peer-public.der --output-file=shared-secret.bin
 ```
 
-Only the `CKD_NULL` key derivation function is currently supported.
+The `CKD_NULL` and SHA-2 (`CKD_SHA224_KDF`, `CKD_SHA256_KDF`,
+`CKD_SHA384_KDF`, `CKD_SHA512_KDF`, using the ANSI X9.63 key derivation
+function) derivation functions are supported.
 
 ## Token initialization
 
