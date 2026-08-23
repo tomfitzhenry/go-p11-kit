@@ -206,6 +206,10 @@ func main() {
 		HardwareVersion: p11kit.Version{Major: 0, Minor: 1},
 		FirmwareVersion: p11kit.Version{Major: 0, Minor: 1},
 		Objects:         objs,
+		// The token is presented as already initialized, so clients can use it
+		// without running C_InitToken. Set this to false to demo token
+		// initialization.
+		Initialized: true,
 	}
 
 	h := p11kit.Handler{

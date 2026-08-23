@@ -26,6 +26,17 @@ p11-kit-client.so shared library, then communicate over RPC to the Go server.
 
 [p11-kit-rpc]: https://p11-glue.github.io/p11-glue/p11-kit/manual/remoting.html
 
+## Token initialization
+
+Slots are presented as already initialized unless `Slot.Initialized` is false.
+An uninitialized token can be initialized by a client via `C_InitToken`, which
+sets the token's label:
+
+```
+$ pkcs11-tool --module /usr/lib/x86_64-linux-gnu/pkcs11/p11-kit-client.so --init-token --slot=0x1 --label=my-token --so-pin=12345678
+Token successfully initialized
+```
+
 ## Demo
 
 The example directory contains a demo server that reads keys and certificates
@@ -54,7 +65,7 @@ Slot 0 (0x1): example-slot
   token label        : example
   token manufacturer : go-p11-kit
   token model        : example-server
-  token flags        : token initialized, readonly
+  token flags        : token initialized
   hardware version   : 0.1
   firmware version   : 0.1
   serial num         : 12345678
