@@ -77,6 +77,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"strings"
 	"sync"
 )
 
@@ -611,7 +612,9 @@ func (h *handler) handleInitToken(req *body) (*body, error) {
 	if slot.Initialized {
 		return nil, errCryptokiAlreadyInitialized
 	}
-	slot.Label = label
+	// The label is space-padded to 32 bytes on the wire, per the PKCS #11
+	// CK_TOKEN_INFO convention, so strip the padding before storing it.
+	slot.Label = strings.TrimRight(label, " \x00")
 	slot.Initialized = true
 	return newResponse(req), nil
 }
