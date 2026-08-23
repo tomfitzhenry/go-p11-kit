@@ -665,6 +665,15 @@ func (b *body) readMechanism(m *mechanism) {
 				return false
 			}
 			m.params = p
+		case ckmECDH1Derive:
+			// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L1589
+			var p ecdh1DeriveParams
+			if !b.buffer.uint64(&p.kdf) ||
+				!b.buffer.byteArray(&p.sharedData) ||
+				!b.buffer.byteArray(&p.publicData) {
+				return false
+			}
+			m.params = p
 		default:
 			var p []byte
 			if !b.buffer.byteArray(&p) {

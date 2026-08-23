@@ -19,6 +19,8 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
@@ -543,5 +545,118 @@ func TestPKCS11ToolInitToken(t *testing.T) {
 	}
 	if slot.Label != "my-token" {
 		t.Errorf("token label = %q, want %q", slot.Label, "my-token")
+	}
+}
+
+// TestPKCS11ToolDerive derives a shared secret from an EC key via
+// pkcs11-tool, and verifies it matches the value computed locally.
+func TestPKCS11ToolDerive(t *testing.T) {
+	testRequiresP11Tools(t)
+
+	basePriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generating base key: %v", err)
+	}
+	base, err := NewPrivateKeyObject(basePriv)
+	if err != nil {
+		t.Fatalf("creating base object: %v", err)
+	}
+	base.SetLabel("derive-key")
+	base.SetDerive()
+
+	peerPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generating peer key: %v", err)
+	}
+	peerDER, err := x509.MarshalPKIXPublicKey(&peerPriv.PublicKey)
+	if err != nil {
+		t.Fatalf("marshaling peer public key: %v", err)
+	}
+
+	tempDir := t.TempDir()
+	peerFile := filepath.Join(tempDir, "peer.der")
+	outFile := filepath.Join(tempDir, "derived.bin")
+	if err := os.WriteFile(peerFile, peerDER, 0644); err != nil {
+		t.Fatalf("writing peer key: %v", err)
+	}
+
+	l, path := newListener(t)
+	h := &Handler{
+		Manufacturer: "test",
+		Library:      "test_lib",
+		LibraryVersion: Version{
+			Major: 0x00,
+			Minor: 0x01,
+		},
+		Slots: []Slot{
+			{
+				ID:          0x01,
+				Initialized: true,
+				Objects:     []Object{base},
+			},
+		},
+	}
+
+	errCh := make(chan error)
+	go func() {
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			select {
+			case <-done:
+			case <-time.After(time.Second * 10):
+				l.Close()
+			}
+		}()
+		conn, err := l.Accept()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		conn.SetDeadline(time.Now().Add(time.Second * 10))
+		errCh <- h.Handle(conn)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, "pkcs11-tool",
+		"--module", p11KitClientPath,
+		"--derive",
+		"-m", "ECDH1-DERIVE",
+		"--slot=0x01",
+		"--label=derive-key",
+		"--type=privkey",
+		"--input-file="+peerFile,
+		"--output-file="+outFile,
+	)
+	cmd.Env = append(os.Environ(),
+		"P11_KIT_DEBUG=all",
+		p11KitEnvServerPID+"="+strconv.Itoa(os.Getpid()),
+		p11KitEnvServerAddr+"=unix:path="+path,
+	)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Errorf("command failed: %v\nstderr=%s\nstdout=%s", err, &stderr, &stdout)
+	} else {
+		t.Logf("%s", &stdout)
+	}
+	if err := <-errCh; err != nil {
+		t.Errorf("handle error: %v", err)
+	}
+
+	got, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("reading derived secret: %v", err)
+	}
+
+	sx, _ := basePriv.Curve.ScalarMult(peerPriv.X, peerPriv.Y, basePriv.D.Bytes())
+	want := make([]byte, 32)
+	sx.FillBytes(want)
+	if !bytes.Equal(got, want) {
+		t.Errorf("derived secret = %x, want %x", got, want)
 	}
 }

@@ -96,6 +96,21 @@ func (o *Object) SetCKAID(id []byte) {
 	})
 }
 
+// SetDerive marks the object as usable for key derivation, by setting its
+// CKA_DERIVE attribute to true. C_DeriveKey rejects objects without this
+// attribute with CKR_KEY_FUNCTION_NOT_PERMITTED.
+func (o *Object) SetDerive() {
+	for i := range o.attributes {
+		if o.attributes[i].typ == attributeDerive {
+			o.attributes[i].byte = bTrue
+			return
+		}
+	}
+	o.attributes = append(o.attributes, attribute{
+		typ: attributeDerive, byte: bTrue,
+	})
+}
+
 // SetCertificate associates a public or private key with a certificate. This is
 // required for many clients to know which key corresponds to which certificate.
 //
@@ -268,10 +283,12 @@ const (
 	ckoCertificate uint64 = 0x00000001
 	ckoPublicKey   uint64 = 0x00000002
 	ckoPrivateKey  uint64 = 0x00000003
+	ckoSecretKey   uint64 = 0x00000004
 
 	// https://github.com/Pkcs11Interop/PKCS11-SPECS/blob/master/v2.20/headers/pkcs11t.h#L370-L380
-	ckkRSA   uint64 = 0x00000000
-	ckkECDSA uint64 = 0x00000003
+	ckkRSA           uint64 = 0x00000000
+	ckkGenericSecret uint64 = 0x00000000
+	ckkECDSA         uint64 = 0x00000003
 )
 
 var (
@@ -519,23 +536,28 @@ func NewX509CertificateObject(cert *x509.Certificate) (Object, error) {
 }
 
 const (
-	// https://github.com/Pkcs11Interop/PKCS11-SPECS/blob/master/v2.20/headers/pkcs11t.h
-	ckmRSAPKCS    = 0x00000001
-	ckmRSAPKCSPSS = 0x0000000D
-	ckmECDSA      = 0x00001041
-	ckmSHA256     = 0x00000250
-	ckmSHA384     = 0x00000260
-	ckmSHA512     = 0x00000270
+	// https://github.com/Pkcs11Interop/PKCS11-SPECS/blob/master/v2.40/headers/pkcs11t.h
+	ckmECDH1Derive = 0x00001050
+	ckmRSAPKCS     = 0x00000001
+	ckmRSAPKCSPSS  = 0x0000000D
+	ckmECDSA       = 0x00001041
+	ckmSHA256      = 0x00000250
+	ckmSHA384      = 0x00000260
+	ckmSHA512      = 0x00000270
 
 	ckgMGF1SHA256 = 0x00000002
 	ckgMGF1SHA384 = 0x00000003
 	ckgMGF1SHA512 = 0x00000004
+
+	// https://docs.oasis-open.org/pkcs11/pkcs11-curr/v2.40/os/pkcs11-curr-v2.40-os.html#_Toc399313332
+	ckdNull = 0x00000001
 )
 
 var mechanismToString = map[uint32]string{
-	ckmRSAPKCS:    "CKM_RSA_PKCS",
-	ckmRSAPKCSPSS: "CKM_RSA_PKCS_PSS",
-	ckmECDSA:      "CKM_ECDSA",
+	ckmRSAPKCS:     "CKM_RSA_PKCS",
+	ckmRSAPKCSPSS:  "CKM_RSA_PKCS_PSS",
+	ckmECDSA:       "CKM_ECDSA",
+	ckmECDH1Derive: "CKM_ECDH1_DERIVE",
 }
 
 type mechanism struct {
@@ -554,11 +576,129 @@ type rsaPKCSPSSParams struct {
 	saltLen uint64
 }
 
+// ecdh1DeriveParams is the wire encoding of CK_ECDH1_DERIVE_PARAMS: the key
+// derivation function, optional shared data, and the peer's public point.
+type ecdh1DeriveParams struct {
+	kdf        uint64
+	sharedData []byte
+	publicData []byte
+}
+
 func (m mechanism) String() string {
 	if s, ok := mechanismToString[m.typ]; ok {
 		return s
 	}
 	return fmt.Sprintf("CK_MECHANISM_TYPE(0x%08x)", m.typ)
+}
+
+// deriveECDH performs CKM_ECDH1_DERIVE on an EC private key, producing a
+// secret key object whose value is the ECDH shared secret.
+//
+// The template may override the derived object's CKA_CLASS, CKA_KEY_TYPE, and
+// CKA_VALUE_LEN attributes.
+//
+// https://docs.oasis-open.org/pkcs11/pkcs11-curr/v2.40/os/pkcs11-curr-v2.40-os.html#_Toc399313332
+func deriveECDH(m mechanism, base Object, tmpl []attribute) (Object, error) {
+	p, ok := m.params.(ecdh1DeriveParams)
+	if !ok {
+		return Object{}, errMechanismParamInvalid
+	}
+
+	priv, ok := base.priv.(*ecdsa.PrivateKey)
+	if !ok {
+		return Object{}, errKeyTypeInconsistent
+	}
+	a, ok := base.attributeValue(attributeDerive)
+	if !ok {
+		return Object{}, errKeyFunctionNotPermitted
+	}
+	var derive byte
+	if !a.setByte(&derive) || derive == 0 {
+		return Object{}, errKeyFunctionNotPermitted
+	}
+
+	secret, err := ecdhSharedSecret(priv, p.publicData, p.kdf)
+	if err != nil {
+		return Object{}, err
+	}
+
+	var (
+		class    = ckoSecretKey
+		keyType  = ckkGenericSecret
+		valueLen = uint64(len(secret))
+	)
+	for _, t := range tmpl {
+		switch t.typ {
+		case attributeClass:
+			t.setUint64(&class)
+		case attributeKeyType:
+			t.setUint64(&keyType)
+		case attributeValueLen:
+			var n uint64
+			if t.setUint64(&n) {
+				secret = resizeSecret(secret, n)
+				valueLen = n
+			}
+		}
+	}
+
+	id, err := newObjectID()
+	if err != nil {
+		return Object{}, err
+	}
+	attrs := []attribute{
+		{typ: attributeClass, ulong: &class},     // CKA_CLASS
+		{typ: attributeKeyType, ulong: &keyType}, // CKA_KEY_TYPE
+		{typ: attributeValue, bytes: secret},     // CKA_VALUE
+		{typ: attributeValueLen, ulong: &valueLen},
+	}
+	return Object{id: id, attributes: attrs}, nil
+}
+
+// ecdhSharedSecret computes the CKM_ECDH1_DERIVE shared secret: the
+// x-coordinate of the point priv.D * peerPublic, post-processed by the KDF.
+//
+// https://docs.oasis-open.org/pkcs11/pkcs11-curr/v2.40/os/pkcs11-curr-v2.40-os.html#_Toc399313332
+func ecdhSharedSecret(priv *ecdsa.PrivateKey, publicData []byte, kdf uint64) ([]byte, error) {
+	curve := priv.Curve
+	byteLen := (curve.Params().BitSize + 7) / 8
+
+	// The peer public data is an ANSI X9.62 uncompressed point.
+	if len(publicData) != 1+2*byteLen || publicData[0] != 0x04 {
+		return nil, errArgumentsBad
+	}
+	x := new(big.Int).SetBytes(publicData[1 : 1+byteLen])
+	y := new(big.Int).SetBytes(publicData[1+byteLen:])
+	if !curve.IsOnCurve(x, y) {
+		return nil, errDomainParamsInvalid
+	}
+
+	sx, _ := curve.ScalarMult(x, y, priv.D.Bytes())
+	secret := make([]byte, byteLen)
+	sx.FillBytes(secret)
+
+	switch kdf {
+	case ckdNull:
+		return secret, nil
+	default:
+		return nil, fmt.Errorf("unsupported ECDH1 KDF 0x%08x: %w", kdf, errMechanismParamInvalid)
+	}
+}
+
+// resizeSecret returns the shared secret resized to n bytes, treating it as a
+// big-endian integer: the most significant bytes are kept when truncating and
+// zero bytes are prepended when lengthening.
+func resizeSecret(secret []byte, n uint64) []byte {
+	if uint64(len(secret)) == n {
+		return secret
+	}
+	out := make([]byte, n)
+	if uint64(len(secret)) > n {
+		copy(out, secret[:n])
+	} else {
+		copy(out[n-uint64(len(secret)):], secret)
+	}
+	return out
 }
 
 // attribute represents a PKCS #11 attribute, a typed object with optional value.
