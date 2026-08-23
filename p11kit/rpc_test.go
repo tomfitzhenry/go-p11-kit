@@ -179,8 +179,9 @@ func TestReadMechanismNoParameters(t *testing.T) {
 	if m.typ != ckmECDSA {
 		t.Fatalf("mechanism type = 0x%x, want 0x%x", m.typ, ckmECDSA)
 	}
-	if m.params != nil {
-		t.Fatalf("unexpected mechanism parameters: %v", m.params)
+	params, ok := m.params.([]byte)
+	if !ok || len(params) != 0 {
+		t.Fatalf("mechanism parameters = %#v, want empty", m.params)
 	}
 }
 

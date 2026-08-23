@@ -616,6 +616,7 @@ func (b *body) readMechanism(m *mechanism) {
 		// cancel operations) are encoded as the mechanism type alone.
 		// See https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L2597
 		if mechanismHasNoParameters(m.typ) {
+			m.params = []byte{}
 			return true
 		}
 
@@ -626,6 +627,7 @@ func (b *body) readMechanism(m *mechanism) {
 			return false
 		}
 		if hasParam == 0 {
+			m.params = []byte{}
 			return true
 		}
 
