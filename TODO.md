@@ -48,5 +48,5 @@ Tasks known to be outstanding, roughly in priority order.
 
 ## Code structure
 
-- [ ] `Slot.mechanisms()` and `Slot.mechanismInfo` are hardcoded; make them
-      configurable now that the list grew with CKM_ECDH1_DERIVE.
+- [x] `Slot.mechanisms()` and `Slot.mechanismInfo` were hardcoded; they're
+      now configurable via `Slot.Mechanisms` and `Slot.MechanismInfo`.

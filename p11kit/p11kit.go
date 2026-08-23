@@ -116,6 +116,17 @@ type Slot struct {
 	// live for the duration of that session.
 	GetObjects func() ([]Object, error)
 
+	// Mechanisms overrides the mechanism types reported by C_GetMechanismList
+	// and accepted by C_GetMechanismInfo. If nil, a default set covering the
+	// mechanisms this package implements is reported.
+	Mechanisms []uint64
+
+	// MechanismInfo overrides the CK_MECHANISM_INFO reported by
+	// C_GetMechanismInfo. It is called with each mechanism type, and should
+	// return 0s with errMechanismInvalid for unsupported types. If nil,
+	// default values are used.
+	MechanismInfo func(m uint64) (minSize, maxSize, flags uint64, err error)
+
 	// Initialized reports whether the token has been initialized, e.g. via
 	// C_InitToken. An uninitialized token advertises itself without
 	// CKF_TOKEN_INITIALIZED and may be initialized by a client to set its
@@ -124,8 +135,9 @@ type Slot struct {
 }
 
 func (s Slot) mechanisms() []uint64 {
-	// TODO(ericchiang): Allow this to be configured through the slot
-	// struct if the private key doesn't support things like RSA-PKCS-PSS.
+	if s.Mechanisms != nil {
+		return s.Mechanisms
+	}
 	return []uint64{
 		ckmRSAKeyPairGen, ckmRSAPKCS, ckmRSAPKCSPSS,
 		ckmECKeyPairGen, ckmECDSA, ckmECDH1Derive,
@@ -144,6 +156,10 @@ const (
 )
 
 func (s Slot) mechanismInfo(m uint64) (minSize, maxSize, flags uint64, err error) {
+	if s.MechanismInfo != nil {
+		return s.MechanismInfo(m)
+	}
+
 	// Max size is chosen arbitrarily.
 	//
 	// TODO(ericchiang): Support decrypt, encrypt, and verify.
