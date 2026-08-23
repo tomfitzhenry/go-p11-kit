@@ -19,6 +19,8 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
@@ -543,5 +545,46 @@ func TestPKCS11ToolInitToken(t *testing.T) {
 	}
 	if slot.Label != "my-token" {
 		t.Errorf("token label = %q, want %q", slot.Label, "my-token")
+	}
+}
+
+// TestKeyObjectsPublicKeyInfo verifies that both the private and public key
+// objects carry a CKA_PUBLIC_KEY_INFO that parses back to the key's public
+// half, so providers can reconstruct it without a separate public-key object.
+func TestKeyObjectsPublicKeyInfo(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generating key: %v", err)
+	}
+
+	priv, err := NewPrivateKeyObject(key)
+	if err != nil {
+		t.Fatalf("NewPrivateKeyObject: %v", err)
+	}
+	pub, err := NewPublicKeyObject(key.Public())
+	if err != nil {
+		t.Fatalf("NewPublicKeyObject: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		obj  Object
+	}{
+		{"private", priv},
+		{"public", pub},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			attr, ok := tc.obj.attributeValue(attributePublicKeyInfo)
+			if !ok {
+				t.Fatal("object has no CKA_PUBLIC_KEY_INFO")
+			}
+			got, err := x509.ParsePKIXPublicKey(attr.bytes)
+			if err != nil {
+				t.Fatalf("parsing CKA_PUBLIC_KEY_INFO: %v", err)
+			}
+			if !got.(*ecdsa.PublicKey).Equal(&key.PublicKey) {
+				t.Fatal("CKA_PUBLIC_KEY_INFO does not match the key")
+			}
+		})
 	}
 }

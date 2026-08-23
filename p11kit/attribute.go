@@ -375,6 +375,14 @@ func newKeyObject(pub crypto.PublicKey, isPrivate bool) ([]attribute, error) {
 		verify = bFalse
 	}
 
+	// CKA_PUBLIC_KEY_INFO lets providers reconstruct the public half of a key
+	// without a separate public-key object; it is valid on both key classes.
+	// http://docs.oasis-open.org/pkcs11/pkcs11-base/v2.40/os/pkcs11-base-v2.40-os.html#_Toc416959958
+	spki, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		return nil, fmt.Errorf("encoding public key info: %v", err)
+	}
+
 	attrs := []attribute{
 		{typ: attributeClass, ulong: &objectClass},  // CKA_CLASS
 		{typ: attributeVerifyRecover, byte: bFalse}, // CKA_VERIFY_RECOVER
@@ -382,16 +390,10 @@ func newKeyObject(pub crypto.PublicKey, isPrivate bool) ([]attribute, error) {
 		{typ: attributeDerive, byte: bFalse},        // CKA_DERIVE
 		{typ: attributeVerify, byte: verify},        // CKA_VERIFY
 		{typ: attributeLocal, byte: bFalse},         // CKA_LOCAL
+		{typ: attributePublicKeyInfo, bytes: spki},  // CKA_PUBLIC_KEY_INFO
 	}
 
 	if isPrivate {
-		// CKA_PUBLIC_KEY_INFO lets providers reconstruct the public half of a
-		// private key object without a separate public-key object.
-		// http://docs.oasis-open.org/pkcs11/pkcs11-base/v2.40/os/pkcs11-base-v2.40-os.html#_Toc416959958
-		spki, err := x509.MarshalPKIXPublicKey(pub)
-		if err != nil {
-			return nil, fmt.Errorf("encoding public key info: %v", err)
-		}
 		attrs = append(attrs,
 			attribute{typ: attributeToken, byte: bTrue},               // CKA_TOKEN
 			attribute{typ: attributeSensitive, byte: bTrue},           // CKA_SENSITIVE
@@ -401,7 +403,6 @@ func newKeyObject(pub crypto.PublicKey, isPrivate bool) ([]attribute, error) {
 			attribute{typ: attributeAlwaysAuthenticate, byte: bFalse}, // CKA_ALWAYS_AUTHENTICATE
 			attribute{typ: attributeSign, byte: bTrue},                // CKA_SIGN
 			attribute{typ: attributeUnwrap, byte: bFalse},             // CKA_UNWRAP
-			attribute{typ: attributePublicKeyInfo, bytes: spki},       // CKA_PUBLIC_KEY_INFO
 		)
 	}
 
