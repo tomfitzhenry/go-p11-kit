@@ -22,7 +22,7 @@
 // Clients configure an environment variable, then dlopen the p11-kit-client.so
 // PKCS #11 shared library to communicate with the remote.
 //
-//     P11_KIT_SERVER_ADDRESS=unix:path=/run/user/12345/p11-kit/pkcs11-12345
+//	P11_KIT_SERVER_ADDRESS=unix:path=/run/user/12345/p11-kit/pkcs11-12345
 //
 // Normally the remote is served by the "p11-kit server ..." command.
 //
@@ -30,46 +30,45 @@
 // program to act as a PKCS #11 module. Users can load keys and certificates,
 // then listen on a unix socket to handle requests from p11-kit-client.so.
 //
-//     privObj, err := p11kit.NewPrivateKeyObject(priv)
-//     if err != nil {
-//         // ...
-//     }
-//     certObj, err := p11kit.NewX509CertificateObject(cert)
-//     if err != nil {
-//         // ...
-//     }
+//	privObj, err := p11kit.NewPrivateKeyObject(priv)
+//	if err != nil {
+//	    // ...
+//	}
+//	certObj, err := p11kit.NewX509CertificateObject(cert)
+//	if err != nil {
+//	    // ...
+//	}
 //
-//     slot := p11kit.Slot{
-//         ID:      0x01,
-//         Objects: []p11kit.Object{privObj, certObj},
-//         // Additional fields...
-//     }
+//	slot := p11kit.Slot{
+//	    ID:      0x01,
+//	    Objects: []p11kit.Object{privObj, certObj},
+//	    // Additional fields...
+//	}
 //
-//     h := p11kit.Handler{
-//         Manufacturer:   "example",
-//         Library:        "example",
-//         LibraryVersion: p11kit.Version{Major: 0, Minor: 1},
-//         Slots:          []p11kit.Slot{slot},
-//     }
+//	h := p11kit.Handler{
+//	    Manufacturer:   "example",
+//	    Library:        "example",
+//	    LibraryVersion: p11kit.Version{Major: 0, Minor: 1},
+//	    Slots:          []p11kit.Slot{slot},
+//	}
 //
-//     l, err := net.Listen("unix", "/run/user/12345/p11-kit/pkcs11-12345")
-//     if err != nil {
-//         // ...
-//     }
-//     defer l.Close()
-//     for {
-//         conn, err := l.Accept()
-//         if err != nil {
-//             // ...
-//         }
-//         go func() {
-//             if err := h.Handle(conn); err != nil {
-//                 log.Println(err)
-//             }
-//             conn.Close()
-//         }()
-//     }
-//
+//	l, err := net.Listen("unix", "/run/user/12345/p11-kit/pkcs11-12345")
+//	if err != nil {
+//	    // ...
+//	}
+//	defer l.Close()
+//	for {
+//	    conn, err := l.Accept()
+//	    if err != nil {
+//	        // ...
+//	    }
+//	    go func() {
+//	        if err := h.Handle(conn); err != nil {
+//	            log.Println(err)
+//	        }
+//	        conn.Close()
+//	    }()
+//	}
 package p11kit
 
 import (
@@ -78,6 +77,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"sync"
 )
 
 // Version of the spec this package aims to implement.
@@ -114,6 +114,12 @@ type Slot struct {
 	// This method is called once per-session, and the returned objects only
 	// live for the duration of that session.
 	GetObjects func() ([]Object, error)
+
+	// Initialized reports whether the token has been initialized, e.g. via
+	// C_InitToken. An uninitialized token advertises itself without
+	// CKF_TOKEN_INITIALIZED and may be initialized by a client to set its
+	// label.
+	Initialized bool
 }
 
 func (s Slot) mechanisms() []uint64 {
@@ -166,6 +172,11 @@ type Handler struct {
 	// token, and generally doesn't attempt to differentiate symantically between
 	// slots and tokens.
 	Slots []Slot
+
+	// mu guards the mutable fields of the tokens in Slots, namely their Label
+	// and Initialized state. These are written by C_InitToken and read when
+	// encoding CK_TOKEN_INFO, possibly from different connections.
+	mu sync.Mutex
 }
 
 // handler holds per-connection data and multable state for a given client.
@@ -327,6 +338,7 @@ func (s *Handler) Handle(rw io.ReadWriter) error {
 		callGetSlotInfo:       h.handleGetSlotInfo,
 		callGetMechanismList:  h.handleGetMechanismList,
 		callGetMechanismInfo:  h.handleGetMechanismInfo,
+		callInitToken:         h.handleInitToken,
 		callGenerateRandom:    h.handleGenerateRandom,
 		callSeedRandom:        h.handleSeedRandom,
 		callOpenSession:       h.handleOpenSession,
@@ -422,18 +434,26 @@ func (h *handler) handleGetTokenInfo(req *body) (*body, error) {
 	}
 
 	// https://docs.oasis-open.org/pkcs11/pkcs11-base/v2.40/os/pkcs11-base-v2.40-os.html#_Toc323024051
-	var flags uint64
-	flags |= 0x00000002 // CKF_WRITE_PROTECTED
-	flags |= 0x00000400 // CKF_TOKEN_INITIALIZED
-
 	const (
 		effectivelyInfinite    = 0x0
 		unavailableInformation = math.MaxUint64
 	)
 
+	// Snapshot the mutable token state under the lock, since it can be
+	// changed by C_InitToken from another connection.
+	h.s.mu.Lock()
+	label := slot.Label
+	initialized := slot.Initialized
+	h.s.mu.Unlock()
+
+	var flags uint64
+	if initialized {
+		flags |= 0x00000400 // CKF_TOKEN_INITIALIZED
+	}
+
 	resp := newResponse(req)
 	// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-client.c#L484
-	resp.writeString(slot.Label, 32)
+	resp.writeString(label, 32)
 	resp.writeString(slot.Manufacturer, 32)
 
 	resp.writeString(slot.Model, 16)
@@ -463,14 +483,14 @@ func (h *handler) handleGetTokenInfo(req *body) (*body, error) {
 	return resp, nil
 }
 
-func (h *handler) slot(id uint64) (Slot, error) {
-	for _, slot := range h.s.Slots {
-		if slot.ID == id {
-			return slot, nil
+func (h *handler) slot(id uint64) (*Slot, error) {
+	for i := range h.s.Slots {
+		if h.s.Slots[i].ID == id {
+			return &h.s.Slots[i], nil
 		}
 	}
 
-	return Slot{}, errSlotIDInvalid
+	return nil, errSlotIDInvalid
 }
 
 func (h *handler) handleGetSlotInfo(req *body) (*body, error) {
@@ -551,6 +571,36 @@ func (h *handler) handleGetMechanismInfo(req *body) (*body, error) {
 	resp.writeUlong(maxSize)
 	resp.writeUlong(flags)
 	return resp, nil
+}
+
+func (h *handler) handleInitToken(req *body) (*body, error) {
+	// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-client.c#L908
+	var (
+		slotID uint64
+		pin    []byte
+		label  string
+	)
+	req.readUlong(&slotID)
+	req.readByteArray(&pin, nil)
+	req.readZeroString(&label)
+	if err := req.err(); err != nil {
+		return nil, err
+	}
+
+	slot, err := h.slot(slotID)
+	if err != nil {
+		return nil, err
+	}
+
+	// https://docs.oasis-open.org/pkcs11/pkcs11-base/v2.40/os/pkcs11-base-v2.40-os.html#_Toc72656120
+	h.s.mu.Lock()
+	defer h.s.mu.Unlock()
+	if slot.Initialized {
+		return nil, errCryptokiAlreadyInitialized
+	}
+	slot.Label = label
+	slot.Initialized = true
+	return newResponse(req), nil
 }
 
 func (h *handler) handleGenerateRandom(req *body) (*body, error) {

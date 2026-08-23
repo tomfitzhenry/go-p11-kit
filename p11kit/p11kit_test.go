@@ -266,6 +266,7 @@ func newTestServer(t *testing.T) *Handler {
 				HardwareVersion: hwVersion,
 				FirmwareVersion: fwVersion,
 				Objects:         objects,
+				Initialized:     true,
 			},
 			{
 				ID:              0x02,
@@ -276,6 +277,7 @@ func newTestServer(t *testing.T) *Handler {
 				HardwareVersion: hwVersion,
 				FirmwareVersion: fwVersion,
 				Objects:         objects2,
+				Initialized:     true,
 			},
 			{
 				ID:              0x03,
@@ -286,6 +288,7 @@ func newTestServer(t *testing.T) *Handler {
 				HardwareVersion: hwVersion,
 				FirmwareVersion: fwVersion,
 				Objects:         objects3,
+				Initialized:     true,
 			},
 		},
 	}
@@ -461,5 +464,84 @@ func TestPKCS11Tool(t *testing.T) {
 				test.after(t)
 			}
 		})
+	}
+}
+
+// TestPKCS11ToolInitToken initializes a previously uninitialized token via
+// pkcs11-tool and verifies the server applies the label.
+func TestPKCS11ToolInitToken(t *testing.T) {
+	testRequiresP11Tools(t)
+
+	l, path := newListener(t)
+	h := &Handler{
+		Manufacturer: "test",
+		Library:      "test_lib",
+		LibraryVersion: Version{
+			Major: 0x00,
+			Minor: 0x01,
+		},
+		Slots: []Slot{
+			{
+				ID:      0x01,
+				Label:   "uninitialized",
+				Objects: []Object{},
+			},
+		},
+	}
+
+	errCh := make(chan error)
+	go func() {
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			select {
+			case <-done:
+			case <-time.After(time.Second * 10):
+				l.Close()
+			}
+		}()
+		conn, err := l.Accept()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		conn.SetDeadline(time.Now().Add(time.Second * 10))
+		errCh <- h.Handle(conn)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, "pkcs11-tool",
+		"--module", p11KitClientPath,
+		"--init-token",
+		"--slot=0x01",
+		"--label=my-token",
+		"--so-pin=12345678",
+	)
+	cmd.Env = append(os.Environ(),
+		"P11_KIT_DEBUG=all",
+		p11KitEnvServerPID+"="+strconv.Itoa(os.Getpid()),
+		p11KitEnvServerAddr+"=unix:path="+path,
+	)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Errorf("command failed: %v\nstderr=%s\nstdout=%s", err, &stderr, &stdout)
+	} else {
+		t.Logf("%s", &stdout)
+	}
+	if err := <-errCh; err != nil {
+		t.Errorf("handle error: %v", err)
+	}
+
+	slot := h.Slots[0]
+	if !slot.Initialized {
+		t.Error("token not marked initialized after C_InitToken")
+	}
+	if slot.Label != "my-token" {
+		t.Errorf("token label = %q, want %q", slot.Label, "my-token")
 	}
 }

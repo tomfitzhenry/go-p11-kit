@@ -423,6 +423,7 @@ const (
 	sigUlongArray      = "au"
 	sigUlongBuffer     = "fu"
 	sigVersion         = "v"
+	sigZeroString      = "z"
 )
 
 func (b *body) err() error {
@@ -590,6 +591,21 @@ func (b *body) readByteArray(a *[]byte, n *uint32) {
 	if n != nil {
 		*n = arrLen
 	}
+}
+
+// readZeroString reads a NUL-terminated string, encoded as a length-prefixed
+// byte array without the terminating NUL.
+//
+// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L523
+func (b *body) readZeroString(s *string) {
+	b.decode(sigZeroString, func() bool {
+		var arr []byte
+		if !b.buffer.byteArray(&arr) {
+			return false
+		}
+		*s = string(arr)
+		return true
+	})
 }
 
 // https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L345
