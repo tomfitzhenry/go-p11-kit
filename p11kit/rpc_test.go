@@ -165,3 +165,45 @@ func TestBufferAdd(t *testing.T) {
 		})
 	}
 }
+
+func TestReadMechanismNoParameters(t *testing.T) {
+	// A real p11-kit client encodes a parameter-less mechanism (CKM_ECDSA)
+	// as the mechanism type alone, with no trailing parameter section.
+	// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L2597
+	b := body{signature: "M", buffer: newBuffer([]byte{0x00, 0x00, 0x10, 0x41})}
+	var m mechanism
+	b.readMechanism(&m)
+	if err := b.err(); err != nil {
+		t.Fatalf("readMechanism: %v", err)
+	}
+	if m.typ != ckmECDSA {
+		t.Fatalf("mechanism type = 0x%x, want 0x%x", m.typ, ckmECDSA)
+	}
+	if m.params != nil {
+		t.Fatalf("unexpected mechanism parameters: %v", m.params)
+	}
+}
+
+func TestReadMechanismWithParameters(t *testing.T) {
+	// A parameterized mechanism (CKM_AES_CBC, 0x1082) carries a validity
+	// byte and a serialized parameter byte array after the mechanism type.
+	var buf buffer
+	buf.addUint32(0x00001082) // CKM_AES_CBC
+	buf.addByte(1)            // parameters present
+	var iv = []byte{1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8}
+	buf.addByteArray(iv)
+
+	b := body{signature: "M", buffer: newBuffer(buf.bytes())}
+	var m mechanism
+	b.readMechanism(&m)
+	if err := b.err(); err != nil {
+		t.Fatalf("readMechanism: %v", err)
+	}
+	if m.typ != 0x00001082 {
+		t.Fatalf("mechanism type = 0x%x, want 0x1082", m.typ)
+	}
+	params, ok := m.params.([]byte)
+	if !ok || string(params) != string(iv) {
+		t.Fatalf("mechanism params = %v, want %v", m.params, iv)
+	}
+}

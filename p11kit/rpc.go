@@ -612,6 +612,23 @@ func (b *body) readMechanism(m *mechanism) {
 			return false
 		}
 
+		// Mechanisms without parameters (and the NULL mechanism used to
+		// cancel operations) are encoded as the mechanism type alone.
+		// See https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L2597
+		if mechanismHasNoParameters(m.typ) {
+			return true
+		}
+
+		// Other mechanisms carry a validity byte followed by their
+		// serialized parameters.
+		var hasParam byte
+		if !b.buffer.byte(&hasParam) {
+			return false
+		}
+		if hasParam == 0 {
+			return true
+		}
+
 		switch m.typ {
 		case ckmRSAPKCSPSS:
 			// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L1315
@@ -632,6 +649,19 @@ func (b *body) readMechanism(m *mechanism) {
 		return true
 
 	})
+}
+
+// mechanismHasNoParameters reports whether a mechanism is encoded on the wire
+// without a parameters section. The list mirrors p11-kit's
+// mechanism_has_no_parameters().
+//
+// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L2451
+func mechanismHasNoParameters(typ uint32) bool {
+	switch typ {
+	case ckmRSAPKCS, ckmECDSA, 0xffffffff:
+		return true
+	}
+	return false
 }
 
 // https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L247
