@@ -126,13 +126,14 @@ func (s Slot) mechanisms() []uint64 {
 	// TODO(ericchiang): Allow this to be configured through the slot
 	// struct if the private key doesn't support things like RSA-PKCS-PSS.
 	return []uint64{
-		ckmRSAPKCS, ckmRSAPKCSPSS, ckmECDSA,
+		ckmRSAPKCS, ckmRSAPKCSPSS, ckmECDSA, ckmECDH1Derive,
 	}
 }
 
 // https://docs.oasis-open.org/pkcs11/pkcs11-base/v2.40/os/pkcs11-base-v2.40-os.html#_Toc235002264
 const (
 	ckfHW      = 0x00000001
+	ckfDerive  = 0x00000010
 	ckfEncrypt = 0x00000100
 	ckfDecrypt = 0x00000200
 	ckfSign    = 0x00000800
@@ -150,6 +151,8 @@ func (s Slot) mechanismInfo(m uint64) (minSize, maxSize, flags uint64, err error
 		return 0, 2 << 24, ckfHW | ckfSign, nil
 	case ckmECDSA:
 		return 0, 2 << 24, ckfHW | ckfSign, nil
+	case ckmECDH1Derive:
+		return 0, 2 << 24, ckfHW | ckfDerive, nil
 	default:
 		return 0, 0, 0, errMechanismInvalid
 	}
@@ -294,6 +297,15 @@ func (s *session) object(objectID uint64) (Object, error) {
 	return Object{}, errObjectHandleInvalid
 }
 
+func (s *session) derive(m mechanism, base Object, tmpl []attribute) (Object, error) {
+	switch m.typ {
+	case ckmECDH1Derive:
+		return deriveECDH(m, base, tmpl)
+	default:
+		return Object{}, errMechanismInvalid
+	}
+}
+
 func (s *session) find(sessionID uint64, tmpl []attribute) error {
 objects:
 	for _, o := range s.objects {
@@ -352,6 +364,7 @@ func (s *Handler) Handle(rw io.ReadWriter) error {
 		callSignUpdate:        h.handleSignUpdate,
 		callSignFinal:         h.handleSignFinal,
 		callGetSessionInfo:    h.handleGetSessionInfo,
+		callDeriveKey:         h.handleDeriveKey,
 	}
 
 	for !done {
@@ -878,6 +891,41 @@ func (h *handler) handleSignFinal(req *body) (*body, error) {
 	}
 	resp := newResponse(req)
 	resp.writeByteArray(data, uint32(len(data)))
+	return resp, nil
+}
+
+func (h *handler) handleDeriveKey(req *body) (*body, error) {
+	// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-client.c#L1947
+	var (
+		sessionID uint64
+		m         mechanism
+		keyID     uint64
+		tmpl      []attribute
+	)
+	req.readUlong(&sessionID)
+	req.readMechanism(&m)
+	req.readUlong(&keyID)
+	req.readAttributeArray(&tmpl)
+	if err := req.err(); err != nil {
+		return nil, err
+	}
+
+	session, err := h.session(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	obj, err := session.object(keyID)
+	if err != nil {
+		return nil, err
+	}
+	derived, err := session.derive(m, obj, tmpl)
+	if err != nil {
+		return nil, err
+	}
+	session.objects = append(session.objects, derived)
+
+	resp := newResponse(req)
+	resp.writeUlong(derived.id)
 	return resp, nil
 }
 
