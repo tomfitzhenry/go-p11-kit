@@ -219,6 +219,25 @@ func parsePriv(t *testing.T, data string) Object {
 	return privObj
 }
 
+// TestSetCKAIDReplaces verifies SetCKAID overrides an existing CKA_ID, such as
+// the serial-number-derived one NewX509CertificateObject sets, rather than
+// appending a duplicate attribute.
+func TestSetCKAIDReplaces(t *testing.T) {
+	certObj, _ := parseCert(t, testECDSACert)
+	if got, ok := certObj.attributeValue(attributeID); !ok {
+		t.Fatal("certificate object has no CKA_ID")
+	} else if bytes.Equal(got.bytes, []byte("new-id")) {
+		t.Fatal("certificate object already carries the new CKA_ID")
+	}
+
+	certObj.SetCKAID([]byte("new-id"))
+	if got, ok := certObj.attributeValue(attributeID); !ok {
+		t.Fatal("certificate object lost its CKA_ID")
+	} else if !bytes.Equal(got.bytes, []byte("new-id")) {
+		t.Errorf("CKA_ID = %q, want %q", got.bytes, "new-id")
+	}
+}
+
 func newTestServer(t *testing.T) *Handler {
 	rsaCertObj, rsaCert := parseCert(t, testRSACert)
 	rsaPubObj := parsePub(t, testRSAPrivKey)

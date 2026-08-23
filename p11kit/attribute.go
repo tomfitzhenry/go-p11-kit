@@ -93,10 +93,11 @@ func (o *Object) SetLabel(label string) {
 
 // SetCKAID assigns the CKA_ID attribute of an object. Clients use CKA_ID to
 // associate related objects, such as a private key and its public key, so the
-// value must match between the pair.
+// value must match between the pair. Any existing CKA_ID (e.g. the one set by
+// NewX509CertificateObject) is replaced.
 func (o *Object) SetCKAID(id []byte) {
-	o.attributes = append(o.attributes, attribute{
-		typ: attributeID, bytes: id,
+	o.setAttributes([]attribute{
+		{typ: attributeID, bytes: id},
 	})
 }
 
