@@ -26,6 +26,18 @@ p11-kit-client.so shared library, then communicate over RPC to the Go server.
 
 [p11-kit-rpc]: https://p11-glue.github.io/p11-glue/p11-kit/manual/remoting.html
 
+## Key derivation
+
+EC private keys can derive a shared secret via `C_DeriveKey` with
+`CKM_ECDH1_DERIVE`, as long as their `CKA_DERIVE` attribute is set with
+`Object.SetDerive`:
+
+```
+$ pkcs11-tool --module /usr/lib/x86_64-linux-gnu/pkcs11/p11-kit-client.so --derive --mechanism ECDH1-DERIVE --slot=0x1 --label=my-key --input-file=peer-public.der --output-file=shared-secret.bin
+```
+
+Only the `CKD_NULL` key derivation function is currently supported.
+
 ## Token initialization
 
 Slots are presented as already initialized unless `Slot.Initialized` is false.

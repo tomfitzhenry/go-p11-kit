@@ -16,6 +16,7 @@ package main
 
 import (
 	"crypto"
+	"crypto/ecdsa"
 	"crypto/x509"
 	"encoding/pem"
 	"flag"
@@ -156,6 +157,10 @@ func main() {
 		obj, err := p11kit.NewPrivateKeyObject(priv)
 		if err != nil {
 			log.Fatalf("Creating object from private key file %s: %v", f, err)
+		}
+		if _, ok := priv.(*ecdsa.PrivateKey); ok {
+			// Allow EC keys to be used for key derivation, e.g. ECDH.
+			obj.SetDerive()
 		}
 		for _, cert := range certs {
 			if !privEqual(priv, cert.PublicKey) {
