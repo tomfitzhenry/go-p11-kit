@@ -153,6 +153,37 @@ func TestBufferAdd(t *testing.T) {
 			},
 			[]byte("12341230" + "20210101"),
 		},
+		{
+			// The outer length of a byte-array attribute is the raw value
+			// length; the value then repeats it as a length-prefixed byte
+			// array. p11-kit's rpc-message.c writes both.
+			"addAttributeByteArray",
+			func(b *buffer) {
+				b.addAttribute(attribute{
+					typ: attributeECPoint, bytes: []byte{0x04, 0x12, 0x34},
+				})
+			},
+			[]byte{
+				0x00, 0x00, 0x01, 0x81, // CKA_EC_POINT
+				0x01,                   // valid
+				0x00, 0x00, 0x00, 0x03, // raw value length
+				0x00, 0x00, 0x00, 0x03, // byte-array length
+				0x04, 0x12, 0x34,
+			},
+		},
+		{
+			"addAttributeUlong",
+			func(b *buffer) {
+				keyType := ckkECDSA
+				b.addAttribute(attribute{typ: attributeKeyType, ulong: &keyType})
+			},
+			[]byte{
+				0x00, 0x00, 0x01, 0x00, // CKA_KEY_TYPE
+				0x01,                   // valid
+				0x00, 0x00, 0x00, 0x08, // value length
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+			},
+		},
 	}
 
 	for _, test := range tests {

@@ -205,7 +205,15 @@ func (b *buffer) addAttribute(a attribute) {
 		return
 	}
 	b.addByte(1)
-	b.addUint32(uint32(len(val)))
+	// p11_rpc_buffer_add_attribute writes the raw attribute value length, then
+	// a type-specific value encoding. For byte-array attributes that encoding
+	// is itself a length-prefixed byte array, so len(val) would over-report
+	// the value length by 4 bytes.
+	length := len(val)
+	if a.typ.valueType() == attributeTypeByteArray {
+		length = len(a.bytes)
+	}
+	b.addUint32(uint32(length))
 	b.b = append(b.b, val...)
 }
 
