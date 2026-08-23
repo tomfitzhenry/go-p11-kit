@@ -87,6 +87,15 @@ func (o *Object) SetLabel(label string) {
 	})
 }
 
+// SetCKAID assigns the CKA_ID attribute of an object. Clients use CKA_ID to
+// associate related objects, such as a private key and its public key, so the
+// value must match between the pair.
+func (o *Object) SetCKAID(id []byte) {
+	o.attributes = append(o.attributes, attribute{
+		typ: attributeID, bytes: id,
+	})
+}
+
 // SetCertificate associates a public or private key with a certificate. This is
 // required for many clients to know which key corresponds to which certificate.
 //
@@ -376,6 +385,13 @@ func newKeyObject(pub crypto.PublicKey, isPrivate bool) ([]attribute, error) {
 	}
 
 	if isPrivate {
+		// CKA_PUBLIC_KEY_INFO lets providers reconstruct the public half of a
+		// private key object without a separate public-key object.
+		// http://docs.oasis-open.org/pkcs11/pkcs11-base/v2.40/os/pkcs11-base-v2.40-os.html#_Toc416959958
+		spki, err := x509.MarshalPKIXPublicKey(pub)
+		if err != nil {
+			return nil, fmt.Errorf("encoding public key info: %v", err)
+		}
 		attrs = append(attrs,
 			attribute{typ: attributeToken, byte: bTrue},               // CKA_TOKEN
 			attribute{typ: attributeSensitive, byte: bTrue},           // CKA_SENSITIVE
@@ -385,6 +401,7 @@ func newKeyObject(pub crypto.PublicKey, isPrivate bool) ([]attribute, error) {
 			attribute{typ: attributeAlwaysAuthenticate, byte: bFalse}, // CKA_ALWAYS_AUTHENTICATE
 			attribute{typ: attributeSign, byte: bTrue},                // CKA_SIGN
 			attribute{typ: attributeUnwrap, byte: bFalse},             // CKA_UNWRAP
+			attribute{typ: attributePublicKeyInfo, bytes: spki},       // CKA_PUBLIC_KEY_INFO
 		)
 	}
 
