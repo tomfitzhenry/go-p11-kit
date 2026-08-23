@@ -37,18 +37,45 @@ import (
 )
 
 const (
-	p11KitClientPath    = "/usr/lib/x86_64-linux-gnu/pkcs11/p11-kit-client.so"
-	p11KitEnvServerAddr = "P11_KIT_SERVER_ADDRESS"
-	p11KitEnvServerPID  = "P11_KIT_SERVER_PID"
+	p11KitClientPathDefault = "/usr/lib/x86_64-linux-gnu/pkcs11/p11-kit-client.so"
+	p11KitEnvClientPath     = "P11_KIT_CLIENT_PATH"
+	p11KitEnvServerAddr     = "P11_KIT_SERVER_ADDRESS"
+	p11KitEnvServerPID      = "P11_KIT_SERVER_PID"
 )
 
-func testRequiresP11Tools(t *testing.T) {
-	//	t.Skip("skipping e2e tests")
-	if _, err := exec.LookPath("pkcs11-tool"); err != nil {
-		t.Skip("pkcs11-tool not available, skipping test")
+// p11KitClientPath resolves the p11-kit-client.so to test against. It uses
+// P11_KIT_CLIENT_PATH if set, otherwise the first existing candidate from a
+// list of distribution-specific locations. Returns "" if none can be found.
+func p11KitClientPath() string {
+	if p := os.Getenv(p11KitEnvClientPath); p != "" {
+		return p
 	}
-	if _, err := os.Stat(p11KitClientPath); err != nil {
-		t.Skip("p11-kit-client.so not available, skipping test")
+	// On NixOS the client appears here once p11-kit's lib output is part of
+	// the system environment:
+	//
+	//     environment.systemPackages = [ pkgs.p11-kit.out ];
+	candidates := []string{
+		p11KitClientPathDefault,                               // Debian/Ubuntu
+		"/run/current-system/sw/lib/pkcs11/p11-kit-client.so", // NixOS
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// testRequiresP11Tools fails the test if the p11-kit client or pkcs11-tool
+// aren't available, since the e2e tests can't pass without them.
+func testRequiresP11Tools(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("pkcs11-tool"); err != nil {
+		t.Fatalf("pkcs11-tool not available: %v", err)
+	}
+	if p := p11KitClientPath(); p == "" {
+		t.Fatalf("p11-kit-client.so not found; set %s or install p11-kit",
+			p11KitEnvClientPath)
 	}
 }
 
@@ -444,7 +471,7 @@ func TestPKCS11Tool(t *testing.T) {
 			cmd := exec.CommandContext(ctx, "pkcs11-tool",
 				append([]string{
 					"--verbose",
-					"--module", p11KitClientPath,
+					"--module", p11KitClientPath(),
 				}, test.args...)...)
 			cmd.Env = append(os.Environ(),
 				"P11_KIT_DEBUG=all",
@@ -516,7 +543,7 @@ func TestPKCS11ToolInitToken(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, "pkcs11-tool",
-		"--module", p11KitClientPath,
+		"--module", p11KitClientPath(),
 		"--init-token",
 		"--slot=0x01",
 		"--label=my-token",
@@ -663,7 +690,7 @@ func TestPKCS11ToolDerive(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, "pkcs11-tool",
-		"--module", p11KitClientPath,
+		"--module", p11KitClientPath(),
 		"--derive",
 		"-m", "ECDH1-DERIVE",
 		"--slot=0x01",
