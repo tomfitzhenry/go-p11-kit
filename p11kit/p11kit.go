@@ -877,18 +877,19 @@ func readByte(r io.Reader) (byte, error) {
 }
 
 func negotiateProtocolVersion(rw io.ReadWriter) error {
-	// Negotiation logic can be found at:
+	// The client sends its maximum supported protocol version; the server
+	// replies with min(client_version, server_maximum). See:
 	//
-	// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-server.c#L1944
-	peerVersion, err := readByte(rw)
-	if err != nil {
+	// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-server.c#L2566
+	if _, err := readByte(rw); err != nil {
 		return fmt.Errorf("reading protocol version: %v", err)
 	}
-	// Protocol used by the current P11 kit.
+
+	// This server only implements protocol version 0. Accept any version the
+	// client proposes and clamp it down to 0, exactly as p11-kit's server
+	// does with a maximum of 0. Rejecting non-zero versions would otherwise
+	// force every modern p11-kit client to reconnect and retry.
 	const protocolVersion byte = 0
-	if peerVersion != protocolVersion {
-		return fmt.Errorf("client attempting to speak unsupported protocol version: %d", peerVersion)
-	}
 	if err := writeByte(rw, protocolVersion); err != nil {
 		return fmt.Errorf("writing protocol version: %v", err)
 	}

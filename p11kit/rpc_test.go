@@ -16,6 +16,7 @@ package p11kit
 
 import (
 	"bytes"
+	"io"
 	"reflect"
 	"testing"
 	"time"
@@ -208,3 +209,49 @@ func TestReadMechanismWithParameters(t *testing.T) {
 		t.Fatalf("mechanism params = %v, want %v", m.params, iv)
 	}
 }
+
+func TestNegotiateProtocolVersion(t *testing.T) {
+	tests := []struct {
+		name   string
+		client byte
+	}{
+		{"legacy version 0", 0},
+		{"modern version 2", 2},
+		{"out of range version", 9},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientR, clientW := io.Pipe()
+			serverR, serverW := io.Pipe()
+			defer clientR.Close()
+			defer clientW.Close()
+			server := rw{serverR, clientW}
+			client := rw{clientR, serverW}
+
+			errCh := make(chan error, 1)
+			go func() { errCh <- negotiateProtocolVersion(server) }()
+
+			if err := writeByte(client, tt.client); err != nil {
+				t.Fatalf("client write: %v", err)
+			}
+			got, err := readByte(client)
+			if err != nil {
+				t.Fatalf("client read: %v", err)
+			}
+			if got != 0 {
+				t.Fatalf("negotiated version = %d, want 0", got)
+			}
+			if err := <-errCh; err != nil {
+				t.Fatalf("negotiate: %v", err)
+			}
+		})
+	}
+}
+
+type rw struct {
+	r io.Reader
+	w io.Writer
+}
+
+func (p rw) Read(b []byte) (int, error)  { return p.r.Read(b) }
+func (p rw) Write(b []byte) (int, error) { return p.w.Write(b) }
