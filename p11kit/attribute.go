@@ -421,7 +421,14 @@ func newKeyObject(pub crypto.PublicKey, isPrivate bool) ([]attribute, error) {
 				attribute{typ: attributeValue},                 // CKA_VALUE (empty)
 			)
 		} else {
-			point := elliptic.Marshal(pub.Curve, pub.X, pub.Y)
+			// CKA_EC_POINT is the DER encoding of an ASN.1 OCTET STRING
+			// containing the ANSI X9.62 ECPoint (0x04 || X || Y), not the raw
+			// point itself.
+			// http://docs.oasis-open.org/pkcs11/pkcs11-base/v2.40/os/pkcs11-base-v2.40-os.html#_Toc416959958
+			point, err := asn1.Marshal(elliptic.Marshal(pub.Curve, pub.X, pub.Y))
+			if err != nil {
+				return nil, fmt.Errorf("encoding ecdsa point: %v", err)
+			}
 			attrs = append(attrs,
 				attribute{typ: attributeEncrypt, byte: bFalse}, // CKA_ENCRYPT
 				attribute{typ: attributeECPoint, bytes: point}, // CKA_EC_POINT
