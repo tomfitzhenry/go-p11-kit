@@ -200,20 +200,59 @@ func TestBufferAdd(t *testing.T) {
 
 func TestReadMechanismNoParameters(t *testing.T) {
 	// A real p11-kit client encodes a parameter-less mechanism (CKM_ECDSA)
-	// as the mechanism type alone, with no trailing parameter section.
-	// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L2597
-	b := body{signature: "M", buffer: newBuffer([]byte{0x00, 0x00, 0x10, 0x41})}
-	var m mechanism
+	// as the mechanism type alone since p11-kit 0.26; earlier versions append
+	// a NULL byte-array marker (0xffffffff). Both must parse.
+	// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L1559
+	// https://github.com/p11-glue/p11-kit/blob/0.26.2/p11-kit/rpc-message.c#L2557
+	for _, tc := range []struct {
+		name string
+		wire []byte
+	}{
+		{"type-alone", []byte{0x00, 0x00, 0x10, 0x41}},
+		{"null-marker", []byte{0x00, 0x00, 0x10, 0x41, 0xff, 0xff, 0xff, 0xff}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := body{signature: "M", buffer: newBuffer(tc.wire)}
+			var m mechanism
+			b.readMechanism(&m)
+			if err := b.err(); err != nil {
+				t.Fatalf("readMechanism: %v", err)
+			}
+			if m.typ != ckmECDSA {
+				t.Fatalf("mechanism type = 0x%x, want 0x%x", m.typ, ckmECDSA)
+			}
+			params, ok := m.params.([]byte)
+			if !ok || len(params) != 0 {
+				t.Fatalf("mechanism parameters = %#v, want empty", m.params)
+			}
+		})
+	}
+}
+
+func TestReadSignInitOldEncoding(t *testing.T) {
+	// p11-kit < 0.26 encodes C_SignInit as session | mechanism-type |
+	// NULL-marker | key-handle. The NULL marker must be consumed as part of
+	// the mechanism, or the key handle mis-parses and leaves trailing data.
+	var buf buffer
+	buf.addUint64(1)          // session id
+	buf.addUint32(ckmECDSA)   // mechanism type
+	buf.addUint32(0xffffffff) // NULL byte-array marker
+	buf.addUint64(7)          // key handle
+
+	b := body{signature: "uMu", buffer: newBuffer(buf.bytes())}
+	var (
+		sessionID uint64
+		m         mechanism
+		keyID     uint64
+	)
+	b.readUlong(&sessionID)
 	b.readMechanism(&m)
+	b.readUlong(&keyID)
 	if err := b.err(); err != nil {
-		t.Fatalf("readMechanism: %v", err)
+		t.Fatalf("parse: %v", err)
 	}
-	if m.typ != ckmECDSA {
-		t.Fatalf("mechanism type = 0x%x, want 0x%x", m.typ, ckmECDSA)
-	}
-	params, ok := m.params.([]byte)
-	if !ok || len(params) != 0 {
-		t.Fatalf("mechanism parameters = %#v, want empty", m.params)
+	if sessionID != 1 || m.typ != ckmECDSA || keyID != 7 {
+		t.Fatalf("session=%d mechanism=0x%x key=%d, want 1/0x%x/7", sessionID, m.typ, keyID, ckmECDSA)
 	}
 }
 

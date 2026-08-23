@@ -352,6 +352,15 @@ func (b *buffer) uint32(n *uint32) bool {
 	return true
 }
 
+// peekUint32 reports whether the next four bytes decode to n, without
+// consuming them.
+func (b *buffer) peekUint32(n uint32) bool {
+	if len(b.b) < 4 {
+		return false
+	}
+	return binaryEncoding.Uint32(b.b[:4]) == n
+}
+
 func (b *buffer) uint64(n *uint64) bool {
 	if len(b.b) < 8 {
 		return false
@@ -637,9 +646,16 @@ func (b *body) readMechanism(m *mechanism) {
 		}
 
 		// Mechanisms without parameters (and the NULL mechanism used to
-		// cancel operations) are encoded as the mechanism type alone.
-		// See https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L2597
+		// cancel operations) are encoded as the mechanism type alone since
+		// p11-kit 0.26; earlier versions append a NULL byte-array marker
+		// (0xffffffff). Tolerate both.
+		// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L1559
+		// https://github.com/p11-glue/p11-kit/blob/0.26.2/p11-kit/rpc-message.c#L2557
 		if mechanismHasNoParameters(m.typ) {
+			if b.buffer.peekUint32(0xffffffff) {
+				var marker uint32
+				b.buffer.uint32(&marker)
+			}
 			m.params = []byte{}
 			return true
 		}
