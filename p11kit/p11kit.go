@@ -356,6 +356,8 @@ func (s *Handler) Handle(rw io.ReadWriter) error {
 		callSeedRandom:        h.handleSeedRandom,
 		callOpenSession:       h.handleOpenSession,
 		callCloseSession:      h.handleCloseSession,
+		callLogin:             h.handleLogin,
+		callLogout:            h.handleLogout,
 		callFindObjectsInit:   h.handleFindObjectsInit,
 		callFindObjects:       h.handleFindObjects,
 		callFindObjectsFinal:  h.handleFindObjectsFinal,
@@ -698,6 +700,43 @@ func (h *handler) handleCloseSession(req *body) (*body, error) {
 		return nil, err
 	}
 	if err := h.closeSession(id); err != nil {
+		return nil, err
+	}
+	return newResponse(req), nil
+}
+
+func (h *handler) handleLogin(req *body) (*body, error) {
+	// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-client.c#L1094
+	var (
+		sessionID, userType uint64
+		pin                 []byte
+	)
+	req.readUlong(&sessionID)
+	req.readUlong(&userType)
+	req.readByteArray(&pin, nil)
+	if err := req.err(); err != nil {
+		return nil, err
+	}
+	if _, err := h.session(sessionID); err != nil {
+		return nil, err
+	}
+
+	// This token has no PIN: every session acts as an authenticated user
+	// (handleGetSessionInfo reports CKS_RO_USER_FUNCTIONS), so a login is
+	// always successful regardless of the presented PIN. Clients such as
+	// github.com/letsencrypt/pkcs11key (used by ghostunnel) refuse to proceed
+	// unless C_Login succeeds.
+	return newResponse(req), nil
+}
+
+func (h *handler) handleLogout(req *body) (*body, error) {
+	// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-client.c#L1116
+	var sessionID uint64
+	req.readUlong(&sessionID)
+	if err := req.err(); err != nil {
+		return nil, err
+	}
+	if _, err := h.session(sessionID); err != nil {
 		return nil, err
 	}
 	return newResponse(req), nil
