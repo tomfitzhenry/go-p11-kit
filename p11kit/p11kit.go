@@ -127,18 +127,20 @@ func (s Slot) mechanisms() []uint64 {
 	// TODO(ericchiang): Allow this to be configured through the slot
 	// struct if the private key doesn't support things like RSA-PKCS-PSS.
 	return []uint64{
-		ckmRSAPKCS, ckmRSAPKCSPSS, ckmECDSA, ckmECDH1Derive,
+		ckmRSAKeyPairGen, ckmRSAPKCS, ckmRSAPKCSPSS,
+		ckmECKeyPairGen, ckmECDSA, ckmECDH1Derive,
 	}
 }
 
 // https://docs.oasis-open.org/pkcs11/pkcs11-base/v2.40/os/pkcs11-base-v2.40-os.html#_Toc235002264
 const (
-	ckfHW      = 0x00000001
-	ckfDerive  = 0x00000010
-	ckfEncrypt = 0x00000100
-	ckfDecrypt = 0x00000200
-	ckfSign    = 0x00000800
-	ckfVerify  = 0x00002000
+	ckfHW              = 0x00000001
+	ckfGenerateKeyPair = 0x00010000
+	ckfDerive          = 0x00000010
+	ckfEncrypt         = 0x00000100
+	ckfDecrypt         = 0x00000200
+	ckfSign            = 0x00000800
+	ckfVerify          = 0x00002000
 )
 
 func (s Slot) mechanismInfo(m uint64) (minSize, maxSize, flags uint64, err error) {
@@ -146,10 +148,14 @@ func (s Slot) mechanismInfo(m uint64) (minSize, maxSize, flags uint64, err error
 	//
 	// TODO(ericchiang): Support decrypt, encrypt, and verify.
 	switch m {
+	case ckmRSAKeyPairGen:
+		return 0, 2 << 24, ckfHW | ckfGenerateKeyPair, nil
 	case ckmRSAPKCS:
 		return 0, 2 << 24, ckfHW | ckfSign, nil
 	case ckmRSAPKCSPSS:
 		return 0, 2 << 24, ckfHW | ckfSign, nil
+	case ckmECKeyPairGen:
+		return 0, 2 << 24, ckfHW | ckfGenerateKeyPair, nil
 	case ckmECDSA:
 		return 0, 2 << 24, ckfHW | ckfSign, nil
 	case ckmECDH1Derive:
@@ -200,6 +206,19 @@ func (h *handler) newSession(slotID uint64) (uint64, error) {
 		return 0, err
 	}
 
+	// Snapshot the token's objects under the lock: C_GenerateKeyPair can
+	// persist new CKA_TOKEN objects to a slot from another connection.
+	h.s.mu.Lock()
+	objects := append([]Object(nil), slot.Objects...)
+	h.s.mu.Unlock()
+	if slot.GetObjects != nil {
+		objs, err := slot.GetObjects()
+		if err != nil {
+			return 0, err
+		}
+		objects = objs
+	}
+
 	if h.sessions == nil {
 		h.sessions = make(map[uint64]*session)
 	}
@@ -212,15 +231,6 @@ func (h *handler) newSession(slotID uint64) (uint64, error) {
 		nextSessionID++
 	}
 	h.lastSessionID = nextSessionID
-
-	objects := slot.Objects
-	if slot.GetObjects != nil {
-		objs, err := slot.GetObjects()
-		if err != nil {
-			return 0, err
-		}
-		objects = objs
-	}
 
 	h.sessions[nextSessionID] = &session{
 		objects: objects,
@@ -367,6 +377,7 @@ func (s *Handler) Handle(rw io.ReadWriter) error {
 		callSignUpdate:        h.handleSignUpdate,
 		callSignFinal:         h.handleSignFinal,
 		callGetSessionInfo:    h.handleGetSessionInfo,
+		callGenerateKeyPair:   h.handleGenerateKeyPair,
 		callDeriveKey:         h.handleDeriveKey,
 	}
 
@@ -934,6 +945,67 @@ func (h *handler) handleSignFinal(req *body) (*body, error) {
 	resp := newResponse(req)
 	resp.writeByteArray(data, uint32(len(data)))
 	return resp, nil
+}
+
+func (h *handler) handleGenerateKeyPair(req *body) (*body, error) {
+	// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-client.c#L1907
+	var (
+		sessionID uint64
+		m         mechanism
+		pubTmpl   []attribute
+		privTmpl  []attribute
+	)
+	req.readUlong(&sessionID)
+	req.readMechanism(&m)
+	req.readAttributeArray(&pubTmpl)
+	req.readAttributeArray(&privTmpl)
+	if err := req.err(); err != nil {
+		return nil, err
+	}
+
+	session, err := h.session(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	pub, priv, err := generateKeyPair(m, pubTmpl, privTmpl)
+	if err != nil {
+		return nil, err
+	}
+	session.objects = append(session.objects, pub, priv)
+
+	// Objects created with CKA_TOKEN persist on the token, so they can be
+	// found by later sessions. Objects without it only live for this session.
+	for _, o := range []Object{pub, priv} {
+		attr, ok := o.attributeValue(attributeToken)
+		if !ok {
+			continue
+		}
+		var token byte
+		if !attr.setByte(&token) || token == 0 {
+			continue
+		}
+		if err := h.persistObject(session.slotID, o); err != nil {
+			return nil, err
+		}
+	}
+
+	resp := newResponse(req)
+	resp.writeUlong(pub.id)
+	resp.writeUlong(priv.id)
+	return resp, nil
+}
+
+// persistObject appends an object to the slot's token objects, so it becomes
+// visible to future sessions. It returns an error if the slot no longer exists.
+func (h *handler) persistObject(slotID uint64, o Object) error {
+	slot, err := h.slot(slotID)
+	if err != nil {
+		return err
+	}
+	h.s.mu.Lock()
+	defer h.s.mu.Unlock()
+	slot.Objects = append(slot.Objects, o)
+	return nil
 }
 
 func (h *handler) handleDeriveKey(req *body) (*body, error) {

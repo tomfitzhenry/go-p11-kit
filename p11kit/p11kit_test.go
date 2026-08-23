@@ -32,6 +32,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -494,6 +495,122 @@ func TestPKCS11Tool(t *testing.T) {
 				test.after(t)
 			}
 		})
+	}
+}
+
+// TestPKCS11ToolGenerateKeyPair generates EC and RSA key pairs via pkcs11-tool
+// on two different slots, then verifies from a new connection that the keys
+// persisted to their tokens and carry the requested label. pkcs11-tool reads
+// the generated keys' attributes back after C_GenerateKeyPair, so the label
+// appearing in its output confirms it was applied end to end.
+func TestPKCS11ToolGenerateKeyPair(t *testing.T) {
+	testRequiresP11Tools(t)
+
+	l, path := newListener(t)
+	h := &Handler{
+		Manufacturer: "test",
+		Library:      "test_lib",
+		LibraryVersion: Version{
+			Major: 0x00,
+			Minor: 0x01,
+		},
+		Slots: []Slot{
+			{
+				ID:          0x01,
+				Label:       "slot-0x01",
+				Initialized: true,
+			},
+			{
+				ID:          0x02,
+				Label:       "slot-0x02",
+				Initialized: true,
+			},
+		},
+	}
+
+	errCh := make(chan error, 8)
+	connections := 0
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			conn.SetDeadline(time.Now().Add(time.Second * 30))
+			go func() {
+				errCh <- h.Handle(conn)
+			}()
+		}
+	}()
+
+	runTool := func(t *testing.T, args ...string) string {
+		t.Helper()
+		connections++
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+		defer cancel()
+
+		var stdout, stderr bytes.Buffer
+		cmd := exec.CommandContext(ctx, "pkcs11-tool",
+			append([]string{"--module", p11KitClientPath()}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"P11_KIT_DEBUG=all",
+			p11KitEnvServerPID+"="+strconv.Itoa(os.Getpid()),
+			p11KitEnvServerAddr+"=unix:path="+path,
+		)
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("pkcs11-tool %v failed: %v\nstderr=%s\nstdout=%s", args, err, &stderr, &stdout)
+		}
+		return stdout.String()
+	}
+
+	for _, tc := range []struct {
+		name  string
+		args  []string
+		label string
+	}{
+		{"EC", []string{"--keypairgen", "--key-type", "EC:prime256v1", "--slot=0x02", "--label=my-e2e-ec-key"}, "my-e2e-ec-key"},
+		{"RSA", []string{"--keypairgen", "--key-type", "RSA:2048", "--slot=0x01", "--label=my-e2e-rsa-key"}, "my-e2e-rsa-key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := runTool(t, tc.args...)
+			for _, want := range []string{
+				"Key pair generated",
+				tc.label,
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("pkcs11-tool output missing %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+
+	// A new connection (a fresh session) must still find the generated keys
+	// by label on the slot where they were created.
+	t.Run("ListGeneratedECOnSlot2", func(t *testing.T) {
+		out := runTool(t, "--list-objects", "--slot=0x02")
+		if !strings.Contains(out, "my-e2e-ec-key") {
+			t.Errorf("slot 0x02 list-objects missing generated EC key:\n%s", out)
+		}
+		if strings.Contains(out, "my-e2e-rsa-key") {
+			t.Errorf("slot 0x02 list-objects contains slot 0x01's key:\n%s", out)
+		}
+	})
+	t.Run("ListGeneratedRSAOnSlot1", func(t *testing.T) {
+		out := runTool(t, "--list-objects", "--slot=0x01")
+		if !strings.Contains(out, "my-e2e-rsa-key") {
+			t.Errorf("slot 0x01 list-objects missing generated RSA key:\n%s", out)
+		}
+		if strings.Contains(out, "my-e2e-ec-key") {
+			t.Errorf("slot 0x01 list-objects contains slot 0x02's key:\n%s", out)
+		}
+	})
+
+	for i := 0; i < connections; i++ {
+		if err := <-errCh; err != nil {
+			t.Errorf("handle error: %v", err)
+		}
 	}
 }
 

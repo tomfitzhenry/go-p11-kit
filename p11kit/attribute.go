@@ -115,6 +115,21 @@ func (o *Object) SetDerive() {
 	})
 }
 
+// setAttributes applies template attributes to the object, overriding any
+// attributes of the same type that were set by default.
+func (o *Object) setAttributes(tmpl []attribute) {
+	for _, a := range tmpl {
+		for i := range o.attributes {
+			if o.attributes[i].typ == a.typ {
+				o.attributes[i] = a
+				goto next
+			}
+		}
+		o.attributes = append(o.attributes, a)
+	next:
+	}
+}
+
 // SetCertificate associates a public or private key with a certificate. This is
 // required for many clients to know which key corresponds to which certificate.
 //
@@ -331,6 +346,13 @@ var (
 	oidNamedCurveP256 = asn1.ObjectIdentifier{1, 2, 840, 10045, 3, 1, 7}
 	oidNamedCurveP384 = asn1.ObjectIdentifier{1, 3, 132, 0, 34}
 	oidNamedCurveP521 = asn1.ObjectIdentifier{1, 3, 132, 0, 35}
+
+	curveOIDs = map[elliptic.Curve]asn1.ObjectIdentifier{
+		elliptic.P224(): oidNamedCurveP224,
+		elliptic.P256(): oidNamedCurveP256,
+		elliptic.P384(): oidNamedCurveP384,
+		elliptic.P521(): oidNamedCurveP521,
+	}
 )
 
 // NewPrivateKeyObject creates a PKCS #11 object from a private key.
@@ -507,6 +529,114 @@ func newKeyObject(pub crypto.PublicKey, isPrivate bool) ([]attribute, error) {
 	return attrs, nil
 }
 
+// generateKeyPair generates a new public/private key pair for the mechanism,
+// applying the templates to the resulting objects' attributes. The public
+// template must specify the key's domain parameters: CKA_MODULUS_BITS (and
+// optionally CKA_PUBLIC_EXPONENT) for CKM_RSA_PKCS_KEY_PAIR_GEN, or
+// CKA_EC_PARAMS for CKM_EC_KEY_PAIR_GEN.
+//
+// https://docs.oasis-open.org/pkcs11/pkcs11-curr/v2.40/os/pkcs11-curr-v2.40-os.html#_Toc399314874
+func generateKeyPair(m mechanism, pubTmpl, privTmpl []attribute) (pub, priv Object, err error) {
+	var key interface{} // crypto.Signer
+	switch m.typ {
+	case ckmRSAKeyPairGen:
+		key, err = generateRSAKeyPair(pubTmpl)
+	case ckmECKeyPairGen:
+		key, err = generateECKeyPair(pubTmpl)
+	default:
+		return Object{}, Object{}, errMechanismInvalid
+	}
+	if err != nil {
+		return Object{}, Object{}, err
+	}
+
+	signer, ok := key.(crypto.Signer)
+	if !ok {
+		return Object{}, Object{}, fmt.Errorf("generated key is not a crypto.Signer: %T", key)
+	}
+	if pub, err = NewPublicKeyObject(signer.Public()); err != nil {
+		return Object{}, Object{}, err
+	}
+	if priv, err = NewPrivateKeyObject(signer); err != nil {
+		return Object{}, Object{}, err
+	}
+	pub.setAttributes(pubTmpl)
+	priv.setAttributes(privTmpl)
+	return pub, priv, nil
+}
+
+// generateRSAKeyPair generates a new RSA key pair, reading CKA_MODULUS_BITS
+// and CKA_PUBLIC_EXPONENT from the public template.
+func generateRSAKeyPair(tmpl []attribute) (*rsa.PrivateKey, error) {
+	var (
+		bits    uint64
+		hasBits bool
+	)
+	for _, t := range tmpl {
+		switch t.typ {
+		case attributeModulusBits:
+			if t.setUint64(&bits) {
+				hasBits = true
+			}
+		case attributePublicExponent:
+			// crypto/rsa only supports the fixed exponent 65537.
+			if len(t.bytes) != 0 && new(big.Int).SetBytes(t.bytes).Int64() != 65537 {
+				return nil, errAttributeValueInvalid
+			}
+		}
+	}
+	if !hasBits {
+		return nil, errTemplateIncomplete
+	}
+	if bits < 1024 {
+		return nil, errKeySizeRange
+	}
+	priv, err := rsa.GenerateKey(rand.Reader, int(bits))
+	if err != nil {
+		return nil, errGeneralError
+	}
+	return priv, nil
+}
+
+// generateECKeyPair generates a new EC key pair, reading CKA_EC_PARAMS (the
+// DER encoding of the named curve's OID) from the public template.
+func generateECKeyPair(tmpl []attribute) (*ecdsa.PrivateKey, error) {
+	var params []byte
+	for _, t := range tmpl {
+		if t.typ == attributeECParams {
+			params = t.bytes
+			break
+		}
+	}
+	if len(params) == 0 {
+		return nil, errTemplateIncomplete
+	}
+	var oid asn1.ObjectIdentifier
+	if _, err := asn1.Unmarshal(params, &oid); err != nil {
+		return nil, errCurveNotSupported
+	}
+	curve := curveForOID(oid)
+	if curve == nil {
+		return nil, errCurveNotSupported
+	}
+	priv, err := ecdsa.GenerateKey(curve, rand.Reader)
+	if err != nil {
+		return nil, errGeneralError
+	}
+	return priv, nil
+}
+
+// curveForOID returns the curve identified by a named-curve OID, or nil if it
+// isn't supported.
+func curveForOID(oid asn1.ObjectIdentifier) elliptic.Curve {
+	for curve, cOID := range curveOIDs {
+		if cOID.Equal(oid) {
+			return curve
+		}
+	}
+	return nil
+}
+
 // NewX509CertificateObject creates a PKCS #11 X.509 certificate object.
 func NewX509CertificateObject(cert *x509.Certificate) (Object, error) {
 	id, err := newObjectID()
@@ -542,13 +672,15 @@ func NewX509CertificateObject(cert *x509.Certificate) (Object, error) {
 
 const (
 	// https://github.com/Pkcs11Interop/PKCS11-SPECS/blob/master/v2.40/headers/pkcs11t.h
-	ckmECDH1Derive = 0x00001050
-	ckmRSAPKCS     = 0x00000001
-	ckmRSAPKCSPSS  = 0x0000000D
-	ckmECDSA       = 0x00001041
-	ckmSHA256      = 0x00000250
-	ckmSHA384      = 0x00000260
-	ckmSHA512      = 0x00000270
+	ckmRSAKeyPairGen = 0x00000000
+	ckmRSAPKCS       = 0x00000001
+	ckmRSAPKCSPSS    = 0x0000000D
+	ckmECKeyPairGen  = 0x00001040
+	ckmECDSA         = 0x00001041
+	ckmECDH1Derive   = 0x00001050
+	ckmSHA256        = 0x00000250
+	ckmSHA384        = 0x00000260
+	ckmSHA512        = 0x00000270
 
 	ckgMGF1SHA256 = 0x00000002
 	ckgMGF1SHA384 = 0x00000003
@@ -563,10 +695,12 @@ const (
 )
 
 var mechanismToString = map[uint32]string{
-	ckmRSAPKCS:     "CKM_RSA_PKCS",
-	ckmRSAPKCSPSS:  "CKM_RSA_PKCS_PSS",
-	ckmECDSA:       "CKM_ECDSA",
-	ckmECDH1Derive: "CKM_ECDH1_DERIVE",
+	ckmRSAKeyPairGen: "CKM_RSA_PKCS_KEY_PAIR_GEN",
+	ckmRSAPKCS:       "CKM_RSA_PKCS",
+	ckmRSAPKCSPSS:    "CKM_RSA_PKCS_PSS",
+	ckmECKeyPairGen:  "CKM_EC_KEY_PAIR_GEN",
+	ckmECDSA:         "CKM_ECDSA",
+	ckmECDH1Derive:   "CKM_ECDH1_DERIVE",
 }
 
 type mechanism struct {

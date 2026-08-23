@@ -51,6 +51,32 @@ $ pkcs11-tool --module /usr/lib/x86_64-linux-gnu/pkcs11/p11-kit-client.so --init
 Token successfully initialized
 ```
 
+## Key pair generation
+
+RSA and EC key pairs can be generated on a token via `C_GenerateKeyPair`, with
+a `CKA_LABEL` template attribute identifying the new keys:
+
+```
+$ pkcs11-tool --module /usr/lib/x86_64-linux-gnu/pkcs11/p11-kit-client.so --keypairgen --key-type EC:prime256v1 --slot=0x1 --label=my-key
+Key pair generated:
+Private Key Object; EC
+  label:      my-key
+  Usage:      sign, derive
+Public Key Object; EC  EC_POINT 256 bits
+  label:      my-key
+  Usage:      verify, derive
+```
+
+`CKM_RSA_PKCS_KEY_PAIR_GEN` (with `CKA_MODULUS_BITS`) and
+`CKM_EC_KEY_PAIR_GEN` (with `CKA_EC_PARAMS`) are supported, on all of the
+P-224/P-256/P-384/P-521 named curves. Keys generated with `CKA_TOKEN` set are
+stored on the slot's token, so later sessions can find them by label, for
+example to sign:
+
+```
+$ pkcs11-tool --module /usr/lib/x86_64-linux-gnu/pkcs11/p11-kit-client.so --sign --slot=0x1 --label=my-key -m ECDSA --input-file=digest.bin --output-file=sig.bin
+```
+
 ## Demo
 
 The example directory contains a demo server that reads keys and certificates
