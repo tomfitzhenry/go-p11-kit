@@ -748,11 +748,16 @@ func (h *handler) handleLogin(req *body) (*body, error) {
 		return nil, err
 	}
 
-	// This token has no PIN: every session acts as an authenticated user
-	// (handleGetSessionInfo reports CKS_RO_USER_FUNCTIONS), so a login is
-	// always successful regardless of the presented PIN. Clients such as
-	// github.com/letsencrypt/pkcs11key (used by ghostunnel) refuse to proceed
-	// unless C_Login succeeds.
+	// This token has no PIN and no Security Officer: every session acts as an
+	// authenticated normal user (handleGetSessionInfo reports
+	// CKS_RO_USER_FUNCTIONS), so a CKU_USER login succeeds regardless of the
+	// presented PIN. Clients such as github.com/letsencrypt/pkcs11key (used by
+	// ghostunnel) refuse to proceed unless C_Login succeeds.
+	//
+	// http://docs.oasis-open.org/pkcs11/pkcs11-base/v2.40/os/pkcs11-base-v2.40-os.html#_Toc416959761
+	if userType != ckuUser {
+		return nil, errUserTypeInvalid
+	}
 	return newResponse(req), nil
 }
 

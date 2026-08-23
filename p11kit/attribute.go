@@ -297,6 +297,10 @@ const (
 	// https://github.com/Pkcs11Interop/PKCS11-SPECS/blob/master/v2.20/headers/pkcs11t.h#L427-L433
 	ckcX509 uint64 = 0
 
+	// https://github.com/Pkcs11Interop/PKCS11-SPECS/blob/master/v2.20/headers/pkcs11t.h#L127-L129
+	ckuSO   uint64 = 0x00000000
+	ckuUser uint64 = 0x00000001
+
 	// https://github.com/Pkcs11Interop/PKCS11-SPECS/blob/master/v2.20/headers/pkcs11t.h#L334-L345
 	ckoData        uint64 = 0x00000000
 	ckoCertificate uint64 = 0x00000001

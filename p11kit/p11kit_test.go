@@ -26,6 +26,7 @@ import (
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"os"
@@ -495,6 +496,40 @@ func TestPKCS11Tool(t *testing.T) {
 				test.after(t)
 			}
 		})
+	}
+}
+
+// TestHandleLoginUserType verifies C_Login accepts a normal (CKU_USER) login
+// and rejects a Security Officer (CKU_SO) login with CKR_USER_TYPE_INVALID,
+// since the token has no SO. It drives the wire handler directly, exercising
+// the same decoding used by p11-kit clients.
+func TestHandleLoginUserType(t *testing.T) {
+	h := &handler{s: &Handler{Slots: []Slot{{ID: 0x01, Label: "slot-0x01"}}}}
+	sid, err := h.newSession(0x01)
+	if err != nil {
+		t.Fatalf("newSession: %v", err)
+	}
+
+	loginRequest := func(userType uint64) *body {
+		pin := []byte("1234")
+		b := &body{signature: "uuay"}
+		b.buffer.addUint64(sid)
+		b.buffer.addUint64(userType)
+		// Byte array: presence byte, then length, then value.
+		b.buffer.addByte(1)
+		b.buffer.addUint32(uint32(len(pin)))
+		b.buffer.b = append(b.buffer.b, pin...)
+		return b
+	}
+
+	if _, err := h.handleLogin(loginRequest(ckuUser)); err != nil {
+		t.Fatalf("CKU_USER login: %v", err)
+	}
+	if _, err := h.handleLogin(loginRequest(ckuSO)); !errors.Is(err, errUserTypeInvalid) {
+		t.Fatalf("CKU_SO login: got %v, want %v", err, errUserTypeInvalid)
+	}
+	if _, err := h.handleLogin(loginRequest(0x02)); !errors.Is(err, errUserTypeInvalid) {
+		t.Fatalf("unknown user type login: got %v, want %v", err, errUserTypeInvalid)
 	}
 }
 
